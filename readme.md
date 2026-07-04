@@ -1,6 +1,7 @@
 # Agentic Blog Writing Agent
 
 # This is juts a small project to apply learnings nothing major :)
+# Will add automation in this soon.
 
 ## Getting Started
 
