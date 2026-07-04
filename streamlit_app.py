@@ -23,9 +23,6 @@ import streamlit as st
 
 import blog_writer as bw
 
-# -----------------------------------------------------------
-# Page setup
-# -----------------------------------------------------------
 st.set_page_config(page_title="AI Blog Writer", page_icon="📝", layout="wide")
 
 NODE_LABELS = {
@@ -75,9 +72,6 @@ def render_markdown_with_images(md_text: str, base_dir: Path):
         st.markdown(md_text[pos:])
 
 
-# -----------------------------------------------------------
-# Sidebar - full pipeline controls
-# -----------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Settings")
 
@@ -129,9 +123,6 @@ with st.sidebar:
         st.caption("Set GOOGLE_API_KEY and HF_TOKEN to enable generation.")
 
 
-# -----------------------------------------------------------
-# Session state
-# -----------------------------------------------------------
 st.session_state.setdefault("final_md", None)
 st.session_state.setdefault("blog_title", None)
 st.session_state.setdefault("last_error", None)
@@ -142,9 +133,6 @@ st.caption(
 )
 
 
-# -----------------------------------------------------------
-# Run the pipeline
-# -----------------------------------------------------------
 def run_pipeline(initial_state: dict):
     log_box = st.status("Starting pipeline...", expanded=True)
     task_titles: dict[int, str] = {}
@@ -154,8 +142,6 @@ def run_pipeline(initial_state: dict):
     try:
         stream = bw.app.stream(initial_state, stream_mode="updates", subgraphs=True)
         for event in stream:
-            # Normalize both (namespace, chunk) and bare-chunk forms across
-            # langgraph versions.
             if isinstance(event, tuple) and len(event) == 2:
                 _namespace, chunk = event
             else:
@@ -235,9 +221,6 @@ if generate_clicked:
         st.session_state["last_error"] = error
 
 
-# -----------------------------------------------------------
-# Output
-# -----------------------------------------------------------
 if st.session_state["last_error"]:
     st.error(f"Generation failed: {st.session_state['last_error']}")
 

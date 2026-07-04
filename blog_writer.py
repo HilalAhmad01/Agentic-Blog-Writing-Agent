@@ -17,26 +17,8 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 api_key = os.environ.get("GOOGLE_API_KEY")
-# ============================================================
-# Blog Writer (Router → (Research?) → Orchestrator → Workers → ReducerWithImages)
-#   merge_content -> decide_images -> generate_and_place_images
-#
-# Image generation: Hugging Face Inference Providers
-# (client.text_to_image returns a PIL.Image.Image, converted to PNG bytes).
-#
-# CHANGES FOR THE STREAMLIT FRONTEND (all backward compatible - every new
-# state key is optional and falls back to the original hardcoded behavior
-# if omitted):
-#   - State.force_mode: let the caller pin mode to closed_book/hybrid/open_book
-#     instead of always trusting the router LLM.
-#   - State.hf_image_model: per-run override of which HF model generates images.
-#   - State.max_images: per-run override of the "max 3 images" rule.
-# ============================================================
 
 
-# -----------------------------
-# 1) Schemas
-# -----------------------------
 class Task(BaseModel):
     id: int
     title: str
@@ -66,7 +48,7 @@ class Plan(BaseModel):
 class EvidenceItem(BaseModel):
     title: str
     url: str
-    published_at: Optional[str] = None  # ISO "YYYY-MM-DD" preferred
+    published_at: Optional[str] = None
     snippet: Optional[str] = None
     source: Optional[str] = None
 
@@ -102,46 +84,35 @@ class GlobalImagePlan(BaseModel):
 class State(TypedDict, total=False):
     topic: str
 
-    # routing / research
     mode: str
     needs_research: bool
     queries: List[str]
     evidence: List[EvidenceItem]
     plan: Optional[Plan]
 
-    # recency
     as_of: str
     recency_days: int
 
-    # workers
-    sections: Annotated[List[tuple[int, str]], operator.add]  # (task_id, section_md)
+    sections: Annotated[List[tuple[int, str]], operator.add]
 
-    # reducer/image
     merged_md: str
     md_with_placeholders: str
     image_specs: List[dict]
 
     final: str
 
-    # --- new, optional, UI-controlled overrides ---
-    force_mode: Optional[str]  # "auto" | "closed_book" | "hybrid" | "open_book"
-    hf_image_model: Optional[str]  # e.g. "krea/Krea-2-Turbo"
-    max_images: int  # default 3
+    force_mode: Optional[str]
+    hf_image_model: Optional[str]
+    max_images: int
 
 
-# -----------------------------
-# 2) LLM
-# -----------------------------
 llm = ChatGoogleGenerativeAI(
-    model="gemini-3.5-flash",  # Use 'gemini-2.5-pro' if you need deeper reasoning
+    model="gemini-3.5-flash",
     api_key=api_key,
     temperature=0.1,
 )
 
 
-# -----------------------------
-# 3) Router
-# -----------------------------
 ROUTER_SYSTEM = """You are a routing module for a technical blog planner.
 
 Decide whether web research is needed BEFORE planning.
@@ -188,7 +159,6 @@ def router_node(state: State) -> dict:
     mode = decision.mode
     needs_research = decision.needs_research
 
-    # Defensive override: never trust the LLM alone to honor a forced mode.
     if force_mode != "auto":
         mode = force_mode
         needs_research = mode != "closed_book"
@@ -205,15 +175,12 @@ def route_next(state: State) -> str:
     return "research" if state["needs_research"] else "orchestrator"
 
 
-# -----------------------------
-# 4) Research (Tavily)
-# -----------------------------
 def _tavily_search(query: str, max_results: int = 5) -> List[dict]:
     if not os.getenv("TAVILY_API_KEY"):
         return []
     try:
         from langchain_community.tools.tavily_search import (
-            TavilySearchResults,  # type: ignore
+            TavilySearchResults,
         )
 
         tool = TavilySearchResults(max_results=max_results)
@@ -295,9 +262,6 @@ def research_node(state: State) -> dict:
     return {"evidence": evidence}
 
 
-# -----------------------------
-# 5) Orchestrator (Plan)
-# -----------------------------
 ORCH_SYSTEM = """You are a senior technical writer and developer advocate.
 Produce a highly actionable outline for a technical blog post.
 
@@ -363,9 +327,6 @@ def orchestrator_node(state: State) -> dict:
     return {"plan": plan}
 
 
-# -----------------------------
-# 6) Fanout
-# -----------------------------
 def fanout(state: State):
     assert state["plan"] is not None
     return [
@@ -385,9 +346,6 @@ def fanout(state: State):
     ]
 
 
-# -----------------------------
-# 7) Worker
-# -----------------------------
 WORKER_SYSTEM = """You are a senior technical writer and developer advocate.
 Write ONE section of a technical blog post in Markdown.
 
@@ -453,10 +411,6 @@ def worker_node(payload: dict) -> dict:
     return {"sections": [(task.id, section_md)]}
 
 
-# ============================================================
-# 8) ReducerWithImages (subgraph)
-#    merge_content -> decide_images -> generate_and_place_images
-# ============================================================
 def merge_content(state: State) -> dict:
     plan = state["plan"]
     if plan is None:
@@ -513,8 +467,6 @@ def decide_images(state: State) -> dict:
     md = image_plan.md_with_placeholders
     images = image_plan.images[:max_images]
 
-    # Defensive cleanup: strip any placeholder the LLM inserted beyond the cap
-    # (or if max_images == 0, strip anything that looks like a placeholder).
     kept_placeholders = {img.placeholder for img in images}
     for match in re.findall(r"\[\[IMAGE_\d+\]\]", md):
         if match not in kept_placeholders:
@@ -526,15 +478,9 @@ def decide_images(state: State) -> dict:
     }
 
 
-# -----------------------------------------------------------
-# Hugging Face image generation
-# -----------------------------------------------------------
-# Which HF model to use for text_to_image by default. A per-run override can
-# be passed via State["hf_image_model"] (e.g. set from the Streamlit UI).
 HF_IMAGE_MODEL = os.environ.get("HF_IMAGE_MODEL", "black-forest-labs/FLUX.1-schnell")
 
-# The InferenceClient is safe to reuse across calls; build it lazily so the
-# module can be imported even if HF_TOKEN isn't set yet (e.g. in tests).
+
 _hf_client = None
 
 
@@ -573,7 +519,7 @@ def _hf_generate_image_bytes(prompt: str, model: str) -> bytes:
     )  # -> PIL.Image.Image
 
     buf = io.BytesIO()
-    # Normalize mode so formats like "P" or "RGBA" don't blow up on save.
+
     if image.mode not in ("RGB", "RGBA"):
         image = image.convert("RGB")
     image.save(buf, format="PNG")
@@ -615,9 +561,6 @@ def generate_and_place_images(state: State) -> dict:
                 img_bytes = _hf_generate_image_bytes(spec["prompt"], model=model)
                 out_path.write_bytes(img_bytes)
             except Exception as e:
-                # Log the full traceback to the console/terminal running the
-                # app so the real cause is inspectable, since the version we
-                # embed in the markdown below is intentionally trimmed.
                 import traceback
 
                 print(
@@ -626,9 +569,6 @@ def generate_and_place_images(state: State) -> dict:
                     flush=True,
                 )
 
-                # Flatten to one line so it doesn't break out of the
-                # Markdown blockquote (a raw multi-line exception message
-                # would render as unquoted plain text after the first line).
                 err_text = " ".join(str(e).split())
                 prompt_block = (
                     f"> **[IMAGE GENERATION FAILED]** {spec.get('caption', '')}\n>\n"
@@ -647,7 +587,6 @@ def generate_and_place_images(state: State) -> dict:
     return {"final": md}
 
 
-# build reducer subgraph
 reducer_graph = StateGraph(State)
 reducer_graph.add_node("merge_content", merge_content)
 reducer_graph.add_node("decide_images", decide_images)
@@ -658,9 +597,7 @@ reducer_graph.add_edge("decide_images", "generate_and_place_images")
 reducer_graph.add_edge("generate_and_place_images", END)
 reducer_subgraph = reducer_graph.compile()
 
-# -----------------------------
-# 9) Build main graph
-# -----------------------------
+
 g = StateGraph(State)
 g.add_node("router", router_node)
 g.add_node("research", research_node)
